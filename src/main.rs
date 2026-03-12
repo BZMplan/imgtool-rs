@@ -14,8 +14,55 @@ use metadata::{CaptureInfo, MetadataRecord, ProcessOptions, RecordStatus, proces
 use resize::{ResizeFilter, ResizeOptions, resize_image};
 use serde::Serialize;
 
+const ROOT_AFTER_HELP: &str = "\
+Examples:\n\
+  imgtool-rs meta ./photos --json\n\
+  imgtool-rs resize in.jpg out.jpg --scale 0.5 --filter lanczos3\n\
+  imgtool-rs compress in.jpg out.jpg --quality 80 --max-size-kb 200\n\
+  imgtool-rs convert in.png out.webp\n\
+  imgtool-rs batch ./input ./output --resize-scale 0.5 --compress --quality 75";
+
+const META_AFTER_HELP: &str = "\
+Examples:\n\
+  imgtool-rs meta ./photo.jpg\n\
+  imgtool-rs meta ./photos --json --include-hidden\n\
+  imgtool-rs meta ./photos --fail-fast";
+
+const RESIZE_AFTER_HELP: &str = "\
+Examples:\n\
+  imgtool-rs resize in.png out.png --scale 0.5\n\
+  imgtool-rs resize in.jpg out.jpg --scale 2.0 --filter catmullrom";
+
+const COMPRESS_AFTER_HELP: &str = "\
+Examples:\n\
+  imgtool-rs compress in.jpg out.jpg --quality 70\n\
+  imgtool-rs compress in.jpg out.jpg --quality 95 --max-size-kb 200\n\
+  imgtool-rs compress in.png out.png";
+
+const CONVERT_AFTER_HELP: &str = "\
+Examples:\n\
+  imgtool-rs convert in.png out.jpg --quality 80\n\
+  imgtool-rs convert in.jpg out.webp\n\
+  imgtool-rs convert in.jpg out.tiff";
+
+const BATCH_AFTER_HELP: &str = "\
+Examples:\n\
+  imgtool-rs batch ./in ./out --resize-scale 0.5\n\
+  imgtool-rs batch ./in ./out --compress --quality 70\n\
+  imgtool-rs batch ./in ./out --resize-scale 0.5 --compress --max-size-kb 300\n\
+  imgtool-rs batch ./in ./out --compress --fail-fast";
+
 #[derive(Parser)]
-#[command(name = "imgtool-rs", version, about = "Image metadata inspection CLI")]
+#[command(
+    name = "imgtool-rs",
+    version,
+    about = "CLI for image metadata, resize, compression, conversion, and batch processing",
+    subcommand_required = true,
+    arg_required_else_help = true,
+    propagate_version = true,
+    next_line_help = true,
+    after_help = ROOT_AFTER_HELP
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -23,16 +70,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Read metadata from a file or directory")]
     Meta(MetaArgs),
+    #[command(about = "Resize a single image by scale ratio")]
     Resize(ResizeArgs),
+    #[command(about = "Compress image file size while keeping dimensions")]
     Compress(CompressArgs),
+    #[command(about = "Convert image format while preserving dimensions")]
     Convert(ConvertArgs),
+    #[command(about = "Run resize/compress pipeline on a directory tree")]
     Batch(BatchArgs),
 }
 
 #[derive(Args)]
+#[command(next_line_help = true, after_help = META_AFTER_HELP)]
 struct MetaArgs {
     /// File or directory path.
+    #[arg(value_name = "PATH")]
     path: PathBuf,
 
     /// Print JSON output instead of text.
@@ -53,11 +107,14 @@ struct MetaArgs {
 }
 
 #[derive(Args)]
+#[command(next_line_help = true, after_help = RESIZE_AFTER_HELP)]
 struct ResizeArgs {
     /// Input image path.
+    #[arg(value_name = "INPUT")]
     input: PathBuf,
 
     /// Output image path.
+    #[arg(value_name = "OUTPUT")]
     output: PathBuf,
 
     /// Scale ratio, e.g. 0.5 for half size or 2.0 for double size.
@@ -70,11 +127,14 @@ struct ResizeArgs {
 }
 
 #[derive(Args)]
+#[command(next_line_help = true, after_help = COMPRESS_AFTER_HELP)]
 struct CompressArgs {
     /// Input image path.
+    #[arg(value_name = "INPUT")]
     input: PathBuf,
 
     /// Output image path.
+    #[arg(value_name = "OUTPUT")]
     output: PathBuf,
 
     /// Compression quality for JPEG output, in [1, 100].
@@ -87,11 +147,14 @@ struct CompressArgs {
 }
 
 #[derive(Args)]
+#[command(next_line_help = true, after_help = CONVERT_AFTER_HELP)]
 struct ConvertArgs {
     /// Input image path.
+    #[arg(value_name = "INPUT")]
     input: PathBuf,
 
     /// Output image path.
+    #[arg(value_name = "OUTPUT")]
     output: PathBuf,
 
     /// Quality used for JPEG output, in [1, 100].
@@ -100,11 +163,14 @@ struct ConvertArgs {
 }
 
 #[derive(Args)]
+#[command(next_line_help = true, after_help = BATCH_AFTER_HELP)]
 struct BatchArgs {
     /// Input directory path.
+    #[arg(value_name = "INPUT_DIR")]
     input_dir: PathBuf,
 
     /// Output directory path.
+    #[arg(value_name = "OUTPUT_DIR")]
     output_dir: PathBuf,
 
     /// Optional resize scale ratio.
