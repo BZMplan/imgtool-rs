@@ -1,5 +1,6 @@
 mod batch;
 mod compress;
+mod convert;
 mod metadata;
 mod resize;
 
@@ -8,6 +9,7 @@ use std::path::PathBuf;
 use batch::{BatchOptions, run_batch};
 use clap::{Args, Parser, Subcommand};
 use compress::{CompressOptions, compress_image};
+use convert::{ConvertOptions, convert_image};
 use metadata::{CaptureInfo, MetadataRecord, ProcessOptions, RecordStatus, process_path};
 use resize::{ResizeFilter, ResizeOptions, resize_image};
 use serde::Serialize;
@@ -24,6 +26,7 @@ enum Commands {
     Meta(MetaArgs),
     Resize(ResizeArgs),
     Compress(CompressArgs),
+    Convert(ConvertArgs),
     Batch(BatchArgs),
 }
 
@@ -81,6 +84,19 @@ struct CompressArgs {
     /// Target max output size in KB (JPEG output only).
     #[arg(long = "max-size-kb")]
     max_size_kb: Option<u64>,
+}
+
+#[derive(Args)]
+struct ConvertArgs {
+    /// Input image path.
+    input: PathBuf,
+
+    /// Output image path.
+    output: PathBuf,
+
+    /// Quality used for JPEG output, in [1, 100].
+    #[arg(long, default_value_t = 85, value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: u8,
 }
 
 #[derive(Args)]
@@ -154,10 +170,43 @@ fn main() {
         Commands::Meta(args) => run_meta(args),
         Commands::Resize(args) => run_resize(args),
         Commands::Compress(args) => run_compress(args),
+        Commands::Convert(args) => run_convert(args),
         Commands::Batch(args) => run_batch_command(args),
     };
 
     std::process::exit(exit_code);
+}
+
+fn run_convert(args: ConvertArgs) -> i32 {
+    let options = ConvertOptions {
+        input: args.input,
+        output: args.output,
+        quality: args.quality,
+    };
+
+    match convert_image(&options) {
+        Ok(result) => {
+            println!(
+                "Converted: {} -> {} | format={} | dimensions={}x{} | size={}B -> {}B{}",
+                result.input.display(),
+                result.output.display(),
+                result.output_format,
+                result.width,
+                result.height,
+                result.input_size_bytes,
+                result.output_size_bytes,
+                result
+                    .applied_quality
+                    .map(|q| format!(" | quality={q}"))
+                    .unwrap_or_default()
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            1
+        }
+    }
 }
 
 fn run_compress(args: CompressArgs) -> i32 {
