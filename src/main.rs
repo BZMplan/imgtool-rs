@@ -1,9 +1,11 @@
+mod batch;
 mod compress;
 mod metadata;
 mod resize;
 
 use std::path::PathBuf;
 
+use batch::{BatchOptions, run_batch};
 use clap::{Args, Parser, Subcommand};
 use compress::{CompressOptions, compress_image};
 use metadata::{CaptureInfo, MetadataRecord, ProcessOptions, RecordStatus, process_path};
@@ -22,6 +24,7 @@ enum Commands {
     Meta(MetaArgs),
     Resize(ResizeArgs),
     Compress(CompressArgs),
+    Batch(BatchArgs),
 }
 
 #[derive(Args)]
@@ -74,6 +77,47 @@ struct CompressArgs {
     /// Compression quality for JPEG output, in [1, 100].
     #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u8).range(1..=100))]
     quality: u8,
+
+    /// Target max output size in KB (JPEG output only).
+    #[arg(long = "max-size-kb")]
+    max_size_kb: Option<u64>,
+}
+
+#[derive(Args)]
+struct BatchArgs {
+    /// Input directory path.
+    input_dir: PathBuf,
+
+    /// Output directory path.
+    output_dir: PathBuf,
+
+    /// Optional resize scale ratio.
+    #[arg(long = "resize-scale")]
+    resize_scale: Option<f64>,
+
+    /// Resampling filter for resize stage.
+    #[arg(long = "resize-filter", default_value = "lanczos3", value_enum)]
+    resize_filter: ResizeFilterArg,
+
+    /// Enable compress stage.
+    #[arg(long)]
+    compress: bool,
+
+    /// Compression quality for JPEG output, in [1, 100].
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: Option<u8>,
+
+    /// Target max output size in KB (JPEG output only).
+    #[arg(long = "max-size-kb")]
+    max_size_kb: Option<u64>,
+
+    /// Include hidden files and hidden directories.
+    #[arg(long)]
+    include_hidden: bool,
+
+    /// Stop batch on first failure.
+    #[arg(long)]
+    fail_fast: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
@@ -110,6 +154,7 @@ fn main() {
         Commands::Meta(args) => run_meta(args),
         Commands::Resize(args) => run_resize(args),
         Commands::Compress(args) => run_compress(args),
+        Commands::Batch(args) => run_batch_command(args),
     };
 
     std::process::exit(exit_code);
@@ -120,6 +165,7 @@ fn run_compress(args: CompressArgs) -> i32 {
         input: args.input,
         output: args.output,
         quality: args.quality,
+        max_size_kb: args.max_size_kb,
     };
 
     match compress_image(&options) {
@@ -131,7 +177,7 @@ fn run_compress(args: CompressArgs) -> i32 {
                 (delta as f64 / result.input_size_bytes as f64) * 100.0
             };
             println!(
-                "Compressed: {} -> {} | dimensions={}x{} | size={}B -> {}B | delta={}B ({:.2}%)",
+                "Compressed: {} -> {} | dimensions={}x{} | size={}B -> {}B | delta={}B ({:.2}%) | quality={}{}",
                 result.input.display(),
                 result.output.display(),
                 result.width,
@@ -139,9 +185,49 @@ fn run_compress(args: CompressArgs) -> i32 {
                 result.input_size_bytes,
                 result.output_size_bytes,
                 delta,
-                ratio
+                ratio,
+                result.applied_quality.unwrap_or(args.quality),
+                result
+                    .target_size_bytes
+                    .map(|bytes| format!(", target<={}B", bytes))
+                    .unwrap_or_default()
             );
             0
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            1
+        }
+    }
+}
+
+fn run_batch_command(args: BatchArgs) -> i32 {
+    let compress_enabled = args.compress || args.quality.is_some() || args.max_size_kb.is_some();
+
+    let options = BatchOptions {
+        input_dir: args.input_dir,
+        output_dir: args.output_dir,
+        resize_scale: args.resize_scale,
+        resize_filter: args.resize_filter.into(),
+        do_compress: compress_enabled,
+        quality: args.quality.unwrap_or(75),
+        max_size_kb: args.max_size_kb,
+        include_hidden: args.include_hidden,
+        fail_fast: args.fail_fast,
+    };
+
+    match run_batch(&options) {
+        Ok(result) => {
+            println!(
+                "Batch summary: total={}, succeeded={}, failed={}, aborted={}",
+                result.total, result.succeeded, result.failed, result.aborted
+            );
+            if !result.errors.is_empty() {
+                for err in &result.errors {
+                    eprintln!("error: {err}");
+                }
+            }
+            if result.failed == 0 { 0 } else { 1 }
         }
         Err(err) => {
             eprintln!("error: {err}");

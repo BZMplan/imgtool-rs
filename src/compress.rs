@@ -1,10 +1,9 @@
-use std::fs::File;
-use std::io::BufWriter;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::{GenericImageView, ImageReader};
+use image::{DynamicImage, GenericImageView, ImageReader};
 
 const SUPPORTED_INPUT_EXTENSIONS: &[&str] =
     &["jpg", "jpeg", "png", "webp", "tiff", "tif", "bmp", "gif"];
@@ -14,6 +13,7 @@ pub struct CompressOptions {
     pub input: PathBuf,
     pub output: PathBuf,
     pub quality: u8,
+    pub max_size_kb: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -24,6 +24,8 @@ pub struct CompressResult {
     pub height: u32,
     pub input_size_bytes: u64,
     pub output_size_bytes: u64,
+    pub applied_quality: Option<u8>,
+    pub target_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,13 +42,20 @@ pub fn compress_image(options: &CompressOptions) -> Result<CompressResult, Strin
         return Err("quality must be in 1..=100".to_string());
     }
 
+    if options.max_size_kb == Some(0) {
+        return Err("max-size-kb must be greater than 0".to_string());
+    }
+
     let output_format = infer_output_format(&options.output)?;
+    if options.max_size_kb.is_some() && !matches!(output_format, OutputFormat::Jpeg) {
+        return Err("--max-size-kb is currently supported only for jpg/jpeg output".to_string());
+    }
 
     let parent = options
         .output
         .parent()
         .ok_or_else(|| format!("invalid output path: {}", options.output.display()))?;
-    std::fs::create_dir_all(parent).map_err(|err| {
+    fs::create_dir_all(parent).map_err(|err| {
         format!(
             "failed to create output directory {}: {err}",
             parent.display()
@@ -76,7 +85,7 @@ pub fn compress_image(options: &CompressOptions) -> Result<CompressResult, Strin
         })?;
 
     let (width, height) = image.dimensions();
-    let input_size_bytes = std::fs::metadata(&options.input)
+    let input_size_bytes = fs::metadata(&options.input)
         .map_err(|err| {
             format!(
                 "failed to read input file metadata {}: {err}",
@@ -85,38 +94,28 @@ pub fn compress_image(options: &CompressOptions) -> Result<CompressResult, Strin
         })?
         .len();
 
-    let file = File::create(&options.output).map_err(|err| {
+    let target_size_bytes = options.max_size_kb.map(|kb| kb.saturating_mul(1024));
+
+    let (encoded, applied_quality) = match output_format {
+        OutputFormat::Jpeg => {
+            if let Some(target) = target_size_bytes {
+                let (bytes, quality) = find_jpeg_bytes_for_target(&image, options.quality, target)?;
+                (bytes, Some(quality))
+            } else {
+                (encode_jpeg(&image, options.quality)?, Some(options.quality))
+            }
+        }
+        OutputFormat::Png => (encode_png(&image)?, None),
+    };
+
+    fs::write(&options.output, &encoded).map_err(|err| {
         format!(
-            "failed to create output file {}: {err}",
+            "failed to write output file {}: {err}",
             options.output.display()
         )
     })?;
-    let writer = BufWriter::new(file);
 
-    match output_format {
-        OutputFormat::Jpeg => {
-            let encoder = JpegEncoder::new_with_quality(writer, options.quality);
-            image.write_with_encoder(encoder).map_err(|err| {
-                format!("failed to encode JPEG {}: {err}", options.output.display())
-            })?;
-        }
-        OutputFormat::Png => {
-            let encoder =
-                PngEncoder::new_with_quality(writer, CompressionType::Best, FilterType::Adaptive);
-            image.write_with_encoder(encoder).map_err(|err| {
-                format!("failed to encode PNG {}: {err}", options.output.display())
-            })?;
-        }
-    }
-
-    let output_size_bytes = std::fs::metadata(&options.output)
-        .map_err(|err| {
-            format!(
-                "failed to read output file metadata {}: {err}",
-                options.output.display()
-            )
-        })?
-        .len();
+    let output_size_bytes = encoded.len() as u64;
 
     Ok(CompressResult {
         input: options.input.clone(),
@@ -125,7 +124,64 @@ pub fn compress_image(options: &CompressOptions) -> Result<CompressResult, Strin
         height,
         input_size_bytes,
         output_size_bytes,
+        applied_quality,
+        target_size_bytes,
     })
+}
+
+fn find_jpeg_bytes_for_target(
+    image: &DynamicImage,
+    preferred_max_quality: u8,
+    target_size_bytes: u64,
+) -> Result<(Vec<u8>, u8), String> {
+    let max_quality = preferred_max_quality.clamp(1, 100);
+
+    let max_quality_bytes = encode_jpeg(image, max_quality)?;
+    if (max_quality_bytes.len() as u64) <= target_size_bytes {
+        return Ok((max_quality_bytes, max_quality));
+    }
+
+    let mut low = 1_i32;
+    let mut high = max_quality as i32 - 1;
+    let mut best: Option<(Vec<u8>, u8)> = None;
+
+    while low <= high {
+        let mid = ((low + high) / 2) as u8;
+        let bytes = encode_jpeg(image, mid)?;
+
+        if (bytes.len() as u64) <= target_size_bytes {
+            best = Some((bytes, mid));
+            low = mid as i32 + 1;
+        } else {
+            high = mid as i32 - 1;
+        }
+    }
+
+    best.ok_or_else(|| {
+        format!(
+            "cannot reach target size {} bytes even with JPEG quality=1",
+            target_size_bytes
+        )
+    })
+}
+
+fn encode_jpeg(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let encoder = JpegEncoder::new_with_quality(&mut bytes, quality);
+    image
+        .write_with_encoder(encoder)
+        .map_err(|err| format!("failed to encode JPEG: {err}"))?;
+    Ok(bytes)
+}
+
+fn encode_png(image: &DynamicImage) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let encoder =
+        PngEncoder::new_with_quality(&mut bytes, CompressionType::Best, FilterType::Adaptive);
+    image
+        .write_with_encoder(encoder)
+        .map_err(|err| format!("failed to encode PNG: {err}"))?;
+    Ok(bytes)
 }
 
 fn validate_input_path(path: &Path) -> Result<(), String> {
