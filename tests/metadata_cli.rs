@@ -220,3 +220,50 @@ fn invalid_extension_single_file_only_updates_summary() {
     assert_eq!(json["summary"]["failed"], 1);
     assert_eq!(json["records"].as_array().expect("records").len(), 0);
 }
+
+#[test]
+fn sony_raw_extension_is_supported_via_exif_metadata() {
+    let dir = tempdir().expect("tempdir");
+    let raw = dir.path().join("sample.arw");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("exif_sample.jpg");
+    fs::copy(fixture, &raw).expect("copy fixture");
+
+    let args = vec![
+        "meta".to_string(),
+        raw.to_string_lossy().to_string(),
+        "--json".to_string(),
+    ];
+    let json = run_json_expect_code(&args, 0);
+
+    assert_eq!(json["summary"]["total"], 1);
+    assert_eq!(json["summary"]["succeeded"], 1);
+    assert_eq!(json["summary"]["failed"], 0);
+
+    let record = &json["records"][0];
+    assert_eq!(record["mime"], "image/x-sony-arw");
+    assert_eq!(record["width"], 2);
+    assert_eq!(record["height"], 2);
+    assert_eq!(record["capture"]["camera_make"], "Canon");
+}
+
+#[test]
+fn broken_raw_file_is_counted_as_failure_without_record() {
+    let dir = tempdir().expect("tempdir");
+    let raw = dir.path().join("broken.nef");
+    fs::write(&raw, [1_u8, 2, 3, 4, 5]).expect("write broken raw");
+
+    let args = vec![
+        "meta".to_string(),
+        raw.to_string_lossy().to_string(),
+        "--json".to_string(),
+    ];
+    let json = run_json_expect_code(&args, 2);
+
+    assert_eq!(json["summary"]["total"], 1);
+    assert_eq!(json["summary"]["succeeded"], 0);
+    assert_eq!(json["summary"]["failed"], 1);
+    assert_eq!(json["records"].as_array().expect("records").len(), 0);
+}
