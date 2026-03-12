@@ -1,9 +1,13 @@
+mod compress;
 mod metadata;
+mod resize;
 
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use compress::{CompressOptions, compress_image};
 use metadata::{CaptureInfo, MetadataRecord, ProcessOptions, RecordStatus, process_path};
+use resize::{ResizeFilter, ResizeOptions, resize_image};
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -16,6 +20,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Meta(MetaArgs),
+    Resize(ResizeArgs),
+    Compress(CompressArgs),
 }
 
 #[derive(Args)]
@@ -40,6 +46,57 @@ struct MetaArgs {
     fail_fast: bool,
 }
 
+#[derive(Args)]
+struct ResizeArgs {
+    /// Input image path.
+    input: PathBuf,
+
+    /// Output image path.
+    output: PathBuf,
+
+    /// Scale ratio, e.g. 0.5 for half size or 2.0 for double size.
+    #[arg(long)]
+    scale: f64,
+
+    /// Resampling filter: nearest, triangle, catmullrom, gaussian, lanczos3.
+    #[arg(long, default_value = "lanczos3", value_enum)]
+    filter: ResizeFilterArg,
+}
+
+#[derive(Args)]
+struct CompressArgs {
+    /// Input image path.
+    input: PathBuf,
+
+    /// Output image path.
+    output: PathBuf,
+
+    /// Compression quality for JPEG output, in [1, 100].
+    #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: u8,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum ResizeFilterArg {
+    Nearest,
+    Triangle,
+    Catmullrom,
+    Gaussian,
+    Lanczos3,
+}
+
+impl From<ResizeFilterArg> for ResizeFilter {
+    fn from(value: ResizeFilterArg) -> Self {
+        match value {
+            ResizeFilterArg::Nearest => ResizeFilter::Nearest,
+            ResizeFilterArg::Triangle => ResizeFilter::Triangle,
+            ResizeFilterArg::Catmullrom => ResizeFilter::CatmullRom,
+            ResizeFilterArg::Gaussian => ResizeFilter::Gaussian,
+            ResizeFilterArg::Lanczos3 => ResizeFilter::Lanczos3,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct JsonEnvelope<'a> {
     summary: &'a metadata::BatchSummary,
@@ -51,9 +108,75 @@ fn main() {
 
     let exit_code = match cli.command {
         Commands::Meta(args) => run_meta(args),
+        Commands::Resize(args) => run_resize(args),
+        Commands::Compress(args) => run_compress(args),
     };
 
     std::process::exit(exit_code);
+}
+
+fn run_compress(args: CompressArgs) -> i32 {
+    let options = CompressOptions {
+        input: args.input,
+        output: args.output,
+        quality: args.quality,
+    };
+
+    match compress_image(&options) {
+        Ok(result) => {
+            let delta = result.input_size_bytes as i128 - result.output_size_bytes as i128;
+            let ratio = if result.input_size_bytes == 0 {
+                0.0
+            } else {
+                (delta as f64 / result.input_size_bytes as f64) * 100.0
+            };
+            println!(
+                "Compressed: {} -> {} | dimensions={}x{} | size={}B -> {}B | delta={}B ({:.2}%)",
+                result.input.display(),
+                result.output.display(),
+                result.width,
+                result.height,
+                result.input_size_bytes,
+                result.output_size_bytes,
+                delta,
+                ratio
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            1
+        }
+    }
+}
+
+fn run_resize(args: ResizeArgs) -> i32 {
+    let options = ResizeOptions {
+        input: args.input,
+        output: args.output,
+        scale: args.scale,
+        filter: args.filter.into(),
+    };
+
+    match resize_image(&options) {
+        Ok(result) => {
+            println!(
+                "Resized: {} ({}x{}) -> {} ({}x{}), scale={}",
+                result.input.display(),
+                result.original_width,
+                result.original_height,
+                result.output.display(),
+                result.output_width,
+                result.output_height,
+                result.scale
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            1
+        }
+    }
 }
 
 fn run_meta(args: MetaArgs) -> i32 {
